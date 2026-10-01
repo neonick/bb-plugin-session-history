@@ -8,4 +8,4 @@ description: Find and read past Claude Code, Codex or Qwen Code sessions that ra
 - `bb session-history list [--agent claude|codex|qwen] [--cwd <path>] [--limit <n>] [--json]` lists sessions newest first with their titles and ids. `--cwd` keeps sessions whose working directory is inside that path.
 - `bb session-history show <agent> <session-id> [--json]` prints the transcript (user and assistant messages; `--json` also includes tool calls). Output over BB's 1 MB CLI limit keeps the newest entries.
 
-Sessions are read-only. Quote the session title and id when you reference one.
+Opening a session in the Sessions page also offers a BB composer below its transcript. Sending the first message starts a linked BB continuation with the complete text conversation. Large snapshots are read in order with the `session_history_read_context` tool, available only to threads carrying a continuation snapshot. Original session files are read-only. Quote the session title and id when you reference one.

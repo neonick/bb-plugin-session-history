@@ -1,13 +1,17 @@
 // bb-plugin-session-history — frontend. A "Past sessions" section on the
 // new-thread screen (scoped to the selected project) and a "Sessions" page
-// with the full list and a read-only transcript at /sessions/<agent>/<id>.
-import { useCallback, useEffect, useMemo, useState } from "react";
+// with the full list and a transcript at /sessions/<agent>/<id>, under which a
+// composer starts a BB thread that continues the session.
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   Markdown,
+  ThreadChat,
   definePluginApp,
+  experimental_NewThreadComposer as NewThreadComposer,
   useBbNavigate,
   useRpc,
+  type NewThreadRequest,
   type PluginHomepageSectionProps,
   type PluginNavPanelProps,
 } from "@get-bb/plugin-sdk/app";
@@ -307,102 +311,177 @@ function Message({ entry }: { entry: TranscriptRow }) {
 
 const TRANSCRIPT_PAGE = 150;
 
+interface TranscriptData {
+  session: SessionRow;
+  entries: TranscriptRow[];
+  truncated: boolean;
+  threadId: string | null;
+  suggestedProjectId: string | null;
+  suggestedProviderId: string | null;
+  suggestedCwd: string | null;
+}
+
+/** Header, controls and the old messages; the newest page is shown first. */
+function SessionTranscript({ data, onBack }: { data: TranscriptData; onBack: () => void }) {
+  const navigate = useBbNavigate();
+  const [showTools, setShowTools] = useState(false);
+  const [limit, setLimit] = useState(TRANSCRIPT_PAGE);
+  const visible = useMemo(
+    () => data.entries.filter((entry) => showTools || entry.role !== "tool"),
+    [data.entries, showTools],
+  );
+  const hidden = Math.max(0, visible.length - limit);
+  return (
+    <div className="mx-auto box-border w-full max-w-3xl px-4 pt-3 md:px-5 md:pt-4">
+      <Button size="sm" variant="ghost" onClick={onBack} className="-ml-2">
+        <Icon name="ArrowLeft" />
+        {t.allSessions}
+      </Button>
+      <div className="mt-2 flex items-start gap-3">
+        <AgentBadge agent={data.session.agent} />
+        <div className="min-w-0 flex-1">
+          <h1 className="text-lg font-semibold leading-snug">{data.session.title}</h1>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {[
+              data.session.cwd,
+              data.session.gitBranch,
+              data.session.model,
+              `${dateTime(data.session.createdAt)} — ${dateTime(data.session.updatedAt)}`,
+            ]
+              .filter(Boolean)
+              .join(" · ")}
+          </p>
+        </div>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {data.threadId !== null ? (
+          <Button size="sm" variant="outline" onClick={() => navigate.toThread(data.threadId!)}>
+            <Icon name="MessageSquare" />
+            {t.openThread}
+          </Button>
+        ) : null}
+        <Button size="sm" variant="outline" onClick={() => copy(data.session.resumeCommand, t.copiedCommand)}>
+          <Icon name="Terminal" />
+          {t.copyResume}
+        </Button>
+        <Button size="sm" variant="outline" onClick={() => copy(data.session.id, t.copiedId)}>
+          <Icon name="Copy" />
+          ID
+        </Button>
+        <Button size="sm" variant="ghost" aria-pressed={showTools} onClick={() => setShowTools((v) => !v)}>
+          <Icon name="Toolbox" />
+          {t.tools}
+        </Button>
+      </div>
+      {data.truncated ? (
+        <p className="mt-3 text-xs text-muted-foreground">{t.truncated(data.entries.length)}</p>
+      ) : null}
+      {hidden > 0 ? (
+        <Button
+          size="sm"
+          variant="outline"
+          className="mt-4 w-full"
+          onClick={() => setLimit((value) => value + TRANSCRIPT_PAGE)}
+        >
+          {t.showEarlier(hidden)}
+        </Button>
+      ) : null}
+      <div className="mt-5 flex flex-col gap-4">
+        {visible.length === 0 ? <EmptyState>{t.emptySession}</EmptyState> : null}
+        {visible.slice(hidden).map((entry, index) => (
+          <Message key={hidden + index} entry={entry} />
+        ))}
+      </div>
+      <div className="my-6 flex items-center gap-3 text-xs text-muted-foreground">
+        <div className="h-px flex-1 bg-border" />
+        {data.threadId !== null ? t.continuedHere : t.continueHint}
+        <div className="h-px flex-1 bg-border" />
+      </div>
+    </div>
+  );
+}
+
 function TranscriptView({ agent, id }: { agent: Agent; id: string }) {
   const rpc = useRpc<typeof rpcContract>();
   const navigate = useBbNavigate();
-  const [data, setData] = useState<{
-    session: SessionRow;
-    entries: TranscriptRow[];
-    truncated: boolean;
-  } | null>(null);
+  const [data, setData] = useState<TranscriptData | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [showTools, setShowTools] = useState(false);
-  const [limit, setLimit] = useState(TRANSCRIPT_PAGE);
+  const scroller = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setData(null);
     setError(null);
-    setLimit(TRANSCRIPT_PAGE);
-    rpc.call("session_transcript", { agent, id }).then(setData, (cause) => setError(errorText(cause)));
+    let active = true;
+    rpc.call("session_transcript", { agent, id }).then(
+      (next) => { if (active) setData(next); },
+      (cause) => { if (active) setError(errorText(cause)); },
+    );
+    return () => { active = false; };
   }, [rpc, agent, id]);
 
-  const visible = useMemo(
-    () => (data?.entries ?? []).filter((entry) => showTools || entry.role !== "tool"),
-    [data, showTools],
-  );
+  // Open at the end of the session, where a continuation starts.
+  const loaded = data !== null && data.threadId === null;
+  useEffect(() => {
+    if (loaded && scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight;
+  }, [loaded]);
+
   const back = () => navigate.toPluginPanel(PANEL_PATH);
+  const onSubmit = async (request: NewThreadRequest) => {
+    try {
+      const { threadId } = await rpc.call("session_continue", {
+        agent,
+        id,
+        request: request as unknown as { projectId: string; input: Record<string, unknown>[] },
+      });
+      setData((prev) => (prev === null ? prev : { ...prev, threadId }));
+    } catch (cause) {
+      toast.error(errorText(cause));
+      throw cause;
+    }
+  };
+
+  if (data !== null && data.threadId !== null) {
+    return (
+      <ThreadChat
+        threadId={data.threadId}
+        variant="full"
+        layout="contained"
+        className="h-full min-h-0 flex-1"
+        leadingContent={<SessionTranscript data={data} onBack={back} />}
+      />
+    );
+  }
 
   return (
-    <div className="h-full min-h-0 flex-1 overflow-y-auto">
-      <div className="mx-auto box-border w-full max-w-3xl px-4 pb-8 pt-3 md:px-5 md:pt-4">
-        <Button size="sm" variant="ghost" onClick={back} className="-ml-2">
-          <Icon name="ArrowLeft" />
-          {t.allSessions}
-        </Button>
-        {error !== null ? (
-          <p role="alert" className="mt-3 text-sm text-destructive">
+    <div ref={scroller} className="h-full min-h-0 flex-1 overflow-y-auto">
+      {error !== null ? (
+        <div className="mx-auto max-w-3xl px-4 pt-4 md:px-5">
+          <p role="alert" className="text-sm text-destructive">
             {error}
           </p>
-        ) : data === null ? (
-          <div className="mt-3">
-            <EmptyState>{t.loadingSession}</EmptyState>
+        </div>
+      ) : data === null ? (
+        <div className="mx-auto max-w-3xl px-4 pt-4 md:px-5">
+          <EmptyState>{t.loadingSession}</EmptyState>
+        </div>
+      ) : (
+        <>
+          <SessionTranscript data={data} onBack={back} />
+          <div className="sticky bottom-0 bg-background pb-4 pt-2">
+            <div className="mx-auto box-border w-full max-w-3xl px-4 md:px-5">
+              <NewThreadComposer
+                layout="document"
+                defaultProjectId={data.suggestedProjectId ?? undefined}
+                defaultProviderId={data.suggestedProviderId ?? undefined}
+                defaultEnvironment={data.suggestedProjectId && data.suggestedCwd ? { type: "host", workspace: { type: "unmanaged", path: data.suggestedCwd } } : undefined}
+                placeholder={t.continuePlaceholder}
+                draftKey={`continue:${agent}/${id}`}
+                onSubmit={onSubmit}
+              />
+            </div>
           </div>
-        ) : (
-          <>
-            <div className="mt-2 flex items-start gap-3">
-              <AgentBadge agent={data.session.agent} />
-              <div className="min-w-0 flex-1">
-                <h1 className="text-lg font-semibold leading-snug">{data.session.title}</h1>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  {[
-                    data.session.cwd,
-                    data.session.gitBranch,
-                    data.session.model,
-                    `${dateTime(data.session.createdAt)} — ${dateTime(data.session.updatedAt)}`,
-                  ]
-                    .filter(Boolean)
-                    .join(" · ")}
-                </p>
-              </div>
-            </div>
-            <div className="mt-3 flex flex-wrap gap-2">
-              <Button size="sm" variant="outline" onClick={() => copy(data.session.resumeCommand, t.copiedCommand)}>
-                <Icon name="Terminal" />
-                {t.copyResume}
-              </Button>
-              <Button size="sm" variant="outline" onClick={() => copy(data.session.id, t.copiedId)}>
-                <Icon name="Copy" />
-                ID
-              </Button>
-              <Button size="sm" variant="ghost" aria-pressed={showTools} onClick={() => setShowTools((v) => !v)}>
-                <Icon name="Toolbox" />
-                {t.tools}
-              </Button>
-            </div>
-            {data.truncated ? (
-              <p className="mt-3 text-xs text-muted-foreground">
-                {t.truncated(data.entries.length)}
-              </p>
-            ) : null}
-            <div className="mt-5 flex flex-col gap-4">
-              {visible.length === 0 ? <EmptyState>{t.emptySession}</EmptyState> : null}
-              {visible.slice(0, limit).map((entry, index) => (
-                <Message key={index} entry={entry} />
-              ))}
-            </div>
-            {visible.length > limit ? (
-              <Button
-                size="sm"
-                variant="outline"
-                className="mt-4 w-full"
-                onClick={() => setLimit((value) => value + TRANSCRIPT_PAGE)}
-              >
-                {t.showMore(visible.length - limit)}
-              </Button>
-            ) : null}
-          </>
-        )}
-      </div>
+        </>
+      )}
     </div>
   );
 }
@@ -411,7 +490,7 @@ function SessionsPage({ subPath }: PluginNavPanelProps) {
   const [agent, id] = subPath.split("/");
   const { sessions, error } = useSessions(null);
   if ((agent === "claude" || agent === "codex" || agent === "qwen") && id) {
-    return <TranscriptView agent={agent} id={id} />;
+    return <TranscriptView key={`${agent}/${id}`} agent={agent} id={id} />;
   }
   return (
     <div className="h-full min-h-0 flex-1 overflow-y-auto">

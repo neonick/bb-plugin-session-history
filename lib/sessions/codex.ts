@@ -174,10 +174,10 @@ function contentText(content: unknown): string {
  * the oldest only have raw `response_item` messages mixed with injected
  * context. The first shape that yields a user message wins.
  */
-export async function readCodexTranscript(file: string): Promise<Transcript> {
-  const items = new TranscriptBuilder();
-  const events = new TranscriptBuilder();
-  const raw = new TranscriptBuilder();
+export async function readCodexTranscript(file: string, complete = false): Promise<Transcript> {
+  const items = new TranscriptBuilder(complete);
+  const events = new TranscriptBuilder(complete);
+  const raw = new TranscriptBuilder(complete);
   await scanJsonl(
     file,
     [

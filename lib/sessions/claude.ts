@@ -148,8 +148,8 @@ export async function listClaudeSessions(): Promise<SessionSummary[]> {
   return summaries.filter((summary): summary is SessionSummary => summary !== null);
 }
 
-export async function readClaudeTranscript(file: string): Promise<Transcript> {
-  const builder = new TranscriptBuilder();
+export async function readClaudeTranscript(file: string, complete = false): Promise<Transcript> {
+  const builder = new TranscriptBuilder(complete);
   await scanJsonl(file, ['"type":"user"', '"type":"assistant"'], (record) => {
     const timestamp = toMs(record.timestamp);
     if (record.isSidechain === true) return;

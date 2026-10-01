@@ -63,14 +63,14 @@ export async function findSession(
   return match(await listSessions(log));
 }
 
-export function readTranscript(session: SessionSummary): Promise<Transcript> {
+export function readTranscript(session: SessionSummary, complete = false): Promise<Transcript> {
   switch (session.agent) {
     case "claude":
-      return readClaudeTranscript(session.file);
+      return readClaudeTranscript(session.file, complete);
     case "codex":
-      return readCodexTranscript(session.file);
+      return readCodexTranscript(session.file, complete);
     case "qwen":
-      return readQwenTranscript(session.file);
+      return readQwenTranscript(session.file, complete);
   }
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-session-history",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Past Claude Code, Codex and Qwen Code sessions in BB, with the titles the agents gave them.",
   "license": "MIT",
@@ -26,7 +26,7 @@
   },
   "bb": {
     "name": "Session History",
-    "description": "Past Claude Code, Codex and Qwen Code sessions with their own titles, on the new-thread screen and a Sessions page with read-only transcripts.",
+    "description": "Browse past Claude, Codex and Qwen sessions with their original titles, and continue conversations directly in BB.",
     "branding": {
       "icon": "Clock"
     },
@@ -38,7 +38,8 @@
   },
   "scripts": {
     "build": "bb plugin build .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/test.mjs"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.3.0",

@@ -19,6 +19,11 @@ const en = {
   emptySession: "This session has no messages.",
   copiedCommand: "Command copied",
   copiedId: "Session ID copied",
+  showEarlier: (count: number) => `Show earlier (${count})`,
+  openThread: "Open thread",
+  continueHint: "Continue this session in BB",
+  continuedHere: "Continued in BB",
+  continuePlaceholder: "Continue the session: the agent reads the entire conversation",
 };
 
 const ru: typeof en = {
@@ -41,6 +46,11 @@ const ru: typeof en = {
   emptySession: "В сессии нет сообщений.",
   copiedCommand: "Команда скопирована",
   copiedId: "ID сессии скопирован",
+  showEarlier: (count) => `Показать раньше (${count})`,
+  openThread: "Открыть тред",
+  continueHint: "Продолжить эту сессию в BB",
+  continuedHere: "Продолжение в BB",
+  continuePlaceholder: "Продолжите сессию: агент прочитает всю переписку",
 };
 
 export const locale =

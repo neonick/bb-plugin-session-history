@@ -1,12 +1,15 @@
 // bb-plugin-session-history — lists past Claude Code, Codex and Qwen Code
 // sessions from their local stores, with the titles those agents show
-// themselves, and renders a read-only transcript. Session files are only read.
+// themselves, renders a read-only transcript, and continues a session as a BB
+// thread that receives the transcript as agent-only context. Session files are
+// only read.
 import {
   PLUGIN_CLI_OUTPUT_MAX_BYTES,
   defineRpcContract,
   type BbPluginApi,
 } from "@get-bb/plugin-sdk";
 import { homedir } from "node:os";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
   AGENTS,
@@ -15,8 +18,10 @@ import {
   listSessions,
   readTranscript,
   resumeCommand,
+  type Agent,
   type SessionSummary,
 } from "./lib/sessions/index.js";
+import { CONTEXT_BUDGET, continuationContext, fullTranscript, transcriptParts } from "./lib/sessions/context.js";
 
 const agentSchema = z.enum(AGENTS as [string, ...string[]]).transform((value) => value as SessionSummary["agent"]);
 
@@ -62,9 +67,37 @@ export const rpcContract = defineRpcContract({
       session: sessionSchema,
       entries: z.array(entrySchema),
       truncated: z.boolean(),
+      /** The BB thread that already continues this session, if any. */
+      threadId: z.string().nullable(),
+      /** Seeds for the continuation composer. */
+      suggestedProjectId: z.string().nullable(),
+      suggestedProviderId: z.string().nullable(),
+      suggestedCwd: z.string().nullable(),
     }),
   },
+  session_continue: {
+    input: z
+      .object({
+        agent: agentSchema,
+        id: z.string().min(1).max(200),
+        /** The composer's NewThreadRequest, forwarded to threads.spawn. */
+        request: z
+          .object({ projectId: z.string(), input: z.array(z.record(z.string(), z.unknown())).min(1) })
+          .passthrough(),
+      })
+      .strict(),
+    output: z.object({ threadId: z.string() }),
+  },
 });
+
+/** BB provider that continues each agent's sessions. */
+const PROVIDER_FOR: Record<Agent, string> = {
+  claude: "claude-code",
+  codex: "codex",
+  qwen: "qwen",
+};
+
+const linkKey = (agent: Agent, id: string) => `link:${agent}:${id}`;
 
 const HOME = homedir();
 
@@ -98,6 +131,85 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
+  /** The BB project whose source contains `cwd`, preferring the deepest match. */
+  async function projectForCwd(cwd: string): Promise<string | null> {
+    if (cwd === "") return null;
+    try {
+      const projects = await bb.sdk.projects.list();
+      let best: { id: string; depth: number } | null = null;
+      for (const project of projects) {
+        for (const source of project.sources) {
+          if (isUnder(cwd, source.path) && (best === null || source.path.length > best.depth)) {
+            best = { id: project.id, depth: source.path.length };
+          }
+        }
+      }
+      return best?.id ?? null;
+    } catch (error) {
+      warn(`projects: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
+  }
+
+  async function availableProvider(agent: Agent): Promise<string | null> {
+    try {
+      const providers = await bb.sdk.providers.list();
+      const id = PROVIDER_FOR[agent];
+      return providers.some((provider) => provider.id === id && provider.available) ? id : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The live thread linked to a session; a deleted thread drops the link. */
+  async function linkedThread(agent: Agent, id: string): Promise<string | null> {
+    const link = await bb.storage.kv.get<{ threadId: string }>(linkKey(agent, id));
+    if (!link) return null;
+    try {
+      const thread = await bb.sdk.threads.get({ threadId: link.threadId });
+      if (thread.deletedAt === null) return thread.id;
+    } catch {
+      // Missing thread: forget the link below.
+    }
+    await bb.storage.kv.delete(linkKey(agent, id));
+    return null;
+  }
+
+  const db = bb.storage.database();
+  bb.storage.migrate(db, [
+    "CREATE TABLE IF NOT EXISTS session_contexts (id TEXT PRIMARY KEY, thread_id TEXT)",
+    "CREATE TABLE IF NOT EXISTS session_context_parts (context_id TEXT NOT NULL, part INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(context_id, part))",
+  ]);
+  const removeContext = (id: string) => {
+    db.prepare("DELETE FROM session_context_parts WHERE context_id = ?").run(id);
+    db.prepare("DELETE FROM session_contexts WHERE id = ?").run(id);
+  };
+  bb.events.on("thread.deleted", ({ thread }) => {
+    const rows = db.prepare("SELECT id FROM session_contexts WHERE thread_id = ?").all(thread.id) as { id: string }[];
+    for (const row of rows) removeContext(row.id);
+  });
+  bb.agents.registerTool({
+    name: "session_history_read_context",
+    description: "Read one part of this continuation's complete original conversation. Read all parts in order before answering the first message.",
+    parameters: z.object({ part: z.number().int().min(1) }).strict(),
+    async execute({ part }, { threadId }) {
+      const metadata = await bb.sdk.threads.getPluginMetadata({ threadId, pluginId: bb.pluginId });
+      const id = metadata.sessionContextId;
+      if (typeof id !== "string") throw new Error("This thread has no session context");
+      const row = db.prepare("SELECT body FROM session_context_parts WHERE context_id = ? AND part = ?").get(id, part) as { body: string } | undefined;
+      if (!row) throw new Error("Session context part not found");
+      const { total } = db.prepare("SELECT COUNT(*) AS total FROM session_context_parts WHERE context_id = ?").get(id) as { total: number };
+      bb.log.info(`context ${id} part ${part}/${total} read by ${threadId}`);
+      return `Part ${part}/${total}${part < total ? `; next part: ${part + 1}` : "; end of original conversation"}\n\n${row.body}`;
+    },
+  });
+  bb.agents.configure((context) => ({
+    tools: typeof context.pluginMetadata.sessionContextId === "string" ? ["session_history_read_context"] : [],
+    skills: [],
+  }));
+
+  const creating = new Map<string, Promise<{ threadId: string }>>();
+
   bb.rpc.register(rpcContract, {
     async sessions_list({ projectId }) {
       const roots = await projectRoots(projectId);
@@ -109,8 +221,65 @@ export default async function plugin(bb: BbPluginApi) {
     async session_transcript({ agent, id }) {
       const session = await findSession(agent, id, warn);
       if (session === null) throw new Error(`Session ${agent}/${id} not found`);
-      const transcript = await readTranscript(session);
-      return { session: toRow(session), ...transcript };
+      const [transcript, threadId, suggestedProjectId, suggestedProviderId] = await Promise.all([
+        readTranscript(session),
+        linkedThread(agent, id),
+        projectForCwd(session.cwd),
+        availableProvider(agent),
+      ]);
+      return { session: toRow(session), ...transcript, threadId, suggestedProjectId, suggestedProviderId, suggestedCwd: session.cwd || null };
+    },
+    async session_continue({ agent, id, request }) {
+      const key = linkKey(agent, id);
+      const pending = creating.get(key);
+      if (pending) return pending;
+      const create = async () => {
+        const session = await findSession(agent, id, warn);
+        if (session === null) throw new Error(`Session ${agent}/${id} not found`);
+        const existing = await linkedThread(agent, id);
+        if (existing !== null) {
+          // A stale composer must not silently discard a newly submitted message.
+          await bb.sdk.threads.send({ threadId: existing, input: request.input } as Parameters<typeof bb.sdk.threads.send>[0]);
+          return { threadId: existing };
+        }
+        const text = fullTranscript(session, await readTranscript(session, true));
+        const parts = text.length > CONTEXT_BUDGET ? transcriptParts(text) : [];
+        const contextId = parts.length > 0 ? randomUUID() : null;
+        if (contextId !== null) {
+          db.transaction(() => {
+            db.prepare("INSERT INTO session_contexts (id) VALUES (?)").run(contextId);
+            const insert = db.prepare("INSERT INTO session_context_parts (context_id, part, body) VALUES (?, ?, ?)");
+            parts.forEach((body, index) => insert.run(contextId, index + 1, body));
+          })();
+        }
+        let threadId: string | null = null;
+        try {
+          const thread = await bb.sdk.threads.spawn({
+            ...request,
+            title: session.title,
+            pluginMetadata: { sessionAgent: agent, sessionId: id, ...(contextId ? { sessionContextId: contextId } : {}) },
+            input: [
+              { type: "text", text: continuationContext(session, text, parts.length), mentions: [], visibility: "agent-only" },
+              ...request.input,
+            ],
+          } as unknown as Parameters<typeof bb.sdk.threads.spawn>[0]);
+          threadId = thread.id;
+          if (contextId) db.prepare("UPDATE session_contexts SET thread_id = ? WHERE id = ?").run(thread.id, contextId);
+          await bb.storage.kv.set(key, { threadId: thread.id });
+          bb.log.info(`continued ${agent}/${id} as ${thread.id} (${text.length} characters, ${parts.length} context parts)`);
+          return { threadId: thread.id };
+        } catch (error) {
+          if (contextId !== null && threadId === null) removeContext(contextId);
+          throw error;
+        }
+      };
+      const promise = create();
+      creating.set(key, promise);
+      try {
+        return await promise;
+      } finally {
+        creating.delete(key);
+      }
     },
   });
 

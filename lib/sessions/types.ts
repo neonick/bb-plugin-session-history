@@ -62,6 +62,8 @@ export class TranscriptBuilder {
   truncated = false;
   private totalText = 0;
 
+  constructor(private readonly complete = false) {}
+
   get full(): boolean {
     return this.truncated;
   }
@@ -70,8 +72,8 @@ export class TranscriptBuilder {
     const trimmed = text.trim();
     if (trimmed === "") return;
     if (this.truncated) return;
-    const clipped = clip(trimmed, role === "tool" ? MAX_TOOL_TEXT : MAX_TEXT);
-    if (this.entries.length >= MAX_ENTRIES || this.totalText + clipped.length > MAX_TOTAL_TEXT) {
+    const clipped = this.complete ? trimmed : clip(trimmed, role === "tool" ? MAX_TOOL_TEXT : MAX_TEXT);
+    if (!this.complete && (this.entries.length >= MAX_ENTRIES || this.totalText + clipped.length > MAX_TOTAL_TEXT)) {
       this.truncated = true;
       return;
     }

@@ -86,8 +86,8 @@ export async function listQwenSessions(): Promise<SessionSummary[]> {
   return summaries.filter((summary): summary is SessionSummary => summary !== null);
 }
 
-export async function readQwenTranscript(file: string): Promise<Transcript> {
-  const builder = new TranscriptBuilder();
+export async function readQwenTranscript(file: string, complete = false): Promise<Transcript> {
+  const builder = new TranscriptBuilder(complete);
   await scanJsonl(file, ['"real_user"', '"type":"assistant"'], (record) => {
     const timestamp = toMs(record.timestamp);
     if (record.type === "user" && record.provenance === "real_user") {
