@@ -1,3 +1,4 @@
+import { codexSessionTitle } from "../lib/sessions/titles.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -58,4 +59,29 @@ test("chunked context retains middle, final state and Unicode across chunk bound
 
 test("a bounded transcript cannot be misrepresented as complete context", () => {
   assert.throws(() => fullTranscript(session, { entries: [], truncated: true }), /complete transcript/);
+});
+
+
+test("continuation titles survive direct and chunked context, including existing sessions", async () => {
+  const titled = { ...session, title: 'История сессий "Claude" в BB' };
+  const text = fullTranscript(titled, { entries: [], truncated: false });
+  const direct = continuationContext(titled, text);
+  const chunked = continuationContext(titled, text, 2);
+  assert.equal(await codexSessionTitle(null, direct, direct, "/missing"), titled.title);
+  assert.equal(await codexSessionTitle(null, chunked, chunked, "/missing"), titled.title);
+  assert.equal(await codexSessionTitle("Моё название", direct, direct, "/missing"), "Моё название");
+  assert.equal(await codexSessionTitle(null, "Обычная сессия", direct, "/missing"), "Обычная сессия");
+  const legacy = direct.replace(/^Original session title: .+\n\n/m, "");
+  assert.equal(await codexSessionTitle(null, legacy, legacy, "/missing"), titled.title);
+  const legacyChunked = chunked.replace(/^Original session title: .+\n\n/m, "");
+  const dir = await mkdtemp(path.join(tmpdir(), "session-history-title-"));
+  const file = path.join(dir, "session.jsonl");
+  try {
+    await writeFile(file, JSON.stringify({ type: "event_msg", payload: { type: "item_completed", item: {
+      type: "DynamicToolCall", tool: "session_history_read_context", arguments: { part: 1 },
+      content_items: [{ type: "inputText", text: `Part 1/2; next part: 2\n\n${text}` }],
+    } } }));
+    assert.equal(await codexSessionTitle(null, legacyChunked, legacyChunked, file), titled.title);
+    assert.equal(await codexSessionTitle(null, legacyChunked, legacyChunked, "/missing"), "Продолжение сессии");
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });

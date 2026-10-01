@@ -1,3 +1,4 @@
+import { codexSessionTitle } from "./titles.js";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -63,7 +64,7 @@ async function listFromStateDb(): Promise<SessionSummary[] | null> {
       .all() as unknown as ThreadRow[];
     const sessions = await mapLimit(rows, 16, async (row) => {
       const info = await statFile(row.rollout_path);
-      const title = row.name?.trim() || row.title.trim() || row.first_user_message.trim();
+      const title = await codexSessionTitle(row.name, row.title, row.first_user_message, row.rollout_path);
       const summary: SessionSummary = {
         agent: "codex",
         id: row.id,
@@ -121,7 +122,7 @@ async function listFromRollouts(): Promise<SessionSummary[]> {
       if (meta === null) return null;
       const { id, cwd, timestamp, source } = meta as Record<string, unknown>;
       if (typeof id !== "string" || (source !== null && typeof source === "object")) return null;
-      const title = names.get(id) || firstPrompt;
+      const title = await codexSessionTitle(null, names.get(id) || "", firstPrompt, file);
       if (title === "") return null;
       const summary: SessionSummary = {
         agent: "codex",
